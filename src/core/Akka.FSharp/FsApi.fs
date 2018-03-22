@@ -10,7 +10,7 @@ namespace Akka.FSharp
 open Akka.Actor
 open System
 open Microsoft.FSharp.Quotations
-open Microsoft.FSharp.Linq.QuotationEvaluation
+open FSharp.Quotations.Evaluator
 
 module Serialization = 
     open MBrace.FsPickler
@@ -37,7 +37,7 @@ module Serialization =
                         
     let internal exprSerializationSupport (system: ActorSystem) =
         let serializer = ExprSerializer(system :?> ExtendedActorSystem)
-        system.Serialization.AddSerializer(serializer)
+        system.Serialization.AddSerializer("ExprSerializer", serializer)
         system.Serialization.AddSerializationMap(typeof<Expr>, serializer)
 
 [<AutoOpen>]
@@ -285,7 +285,7 @@ module Actors =
                         member __.Unstash() = (this :> IWithUnboundedStash).Stash.Unstash()
                         member __.UnstashAll() = (this :> IWithUnboundedStash).Stash.UnstashAll() }
         
-        new(actor : Expr<Actor<'Message> -> Cont<'Message, 'Returned>>) = FunActor(actor.Compile () ())
+        new(actor : Expr<Actor<'Message> -> Cont<'Message, 'Returned>>) = FunActor(actor.Compile ())
         member __.Sender() : IActorRef = base.Sender
         member __.Unhandled msg = base.Unhandled msg
         override x.OnReceive msg = 
@@ -351,7 +351,6 @@ module Logging =
 
 module Linq = 
     open System.Linq.Expressions
-    open Microsoft.FSharp.Linq
     
     let (|Lambda|_|) (e : Expression) = 
         match e with
@@ -372,11 +371,23 @@ module Linq =
     
     let (|Ar|) (p : System.Collections.ObjectModel.ReadOnlyCollection<Expression>) = Array.ofSeq p
 
+    let (|New|_|) (e : Expression) = 
+        match e with
+        | :? NewExpression as n -> Some(n.Constructor, n.Arguments)
+        | _ -> None
+
+    let (|Const|_|) (e : Expression) =
+        match e with
+        | :? ConstantExpression as c -> Some(c.Value)
+        | _ -> None
+
     let toExpression<'Actor>(f : System.Linq.Expressions.Expression) = 
             match f with
             | Lambda(_, Invoke(Call(null, Method "ToFSharpFunc", Ar [| Lambda(_, p) |]))) 
             | Call(null, Method "ToFSharpFunc", Ar [| Lambda(_, p) |]) -> 
                 Expression.Lambda(p, [||]) :?> System.Linq.Expressions.Expression<System.Func<'Actor>>
+            | Lambda(_, New(_, Ar [| Const(_) |])) ->
+                f :?> System.Linq.Expressions.Expression<System.Func<'Actor>>
             | _ -> failwith "Doesn't match"
  
     type Expression = 
@@ -412,7 +423,7 @@ type ExprDeciderSurrogate(serializedExpr: byte array) =
 
 and ExprDecider (expr: Expr<(exn->Directive)>) =
     member __.Expr = expr
-    member private this.Compiled = lazy this.Expr.Compile()()
+    member private this.Compiled = lazy this.Expr.Compile()
     interface IDecider with
         member this.Decide (e: exn): Directive = this.Compiled.Value (e)
     interface ISurrogated with
